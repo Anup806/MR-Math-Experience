@@ -1,3 +1,6 @@
 game_data
 hand_landmarker.task
 .venv
+__pycache__/
+pc_bkt_model__1_.pkl
+pc_bkt_after_realdata.ipynb
