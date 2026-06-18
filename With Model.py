@@ -10,6 +10,8 @@ import os
 import json
 import pickle
 from datetime import datetime
+from urllib.request import urlretrieve
+from types import SimpleNamespace
 
 try:
     import pygame
@@ -23,6 +25,53 @@ try:
     DKT_AVAILABLE = True
 except Exception:
     DKT_AVAILABLE = False
+
+from mediapipe.tasks import python as mp_tasks
+from mediapipe.tasks.python import vision
+from mediapipe.tasks.python.vision.core.image import Image, ImageFormat
+
+HAND_LANDMARKER_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+HAND_LANDMARKER_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hand_landmarker.task")
+hand_landmarker = None
+
+
+def load_hand_landmarker():
+    global hand_landmarker
+    if hand_landmarker is not None:
+        return hand_landmarker
+
+    try:
+        if not os.path.exists(HAND_LANDMARKER_MODEL_PATH):
+            print("Downloading hand landmark model...")
+            urlretrieve(HAND_LANDMARKER_MODEL_URL, HAND_LANDMARKER_MODEL_PATH)
+
+        options = vision.HandLandmarkerOptions(
+            base_options=mp_tasks.BaseOptions(model_asset_path=HAND_LANDMARKER_MODEL_PATH),
+            running_mode=vision.RunningMode.IMAGE,
+            num_hands=1,
+            min_hand_detection_confidence=0.7,
+            min_hand_presence_confidence=0.7,
+            min_tracking_confidence=0.7,
+        )
+        hand_landmarker = vision.HandLandmarker.create_from_options(options)
+        print("✓ Hand gesture tracking initialized")
+    except Exception as e:
+        print(f"⚠ Hand gesture tracking unavailable: {e}")
+        hand_landmarker = None
+
+    return hand_landmarker
+
+
+def detect_hand_landmarks(frame_bgr):
+    if hand_landmarker is None:
+        return None
+
+    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    mp_image = Image(image_format=ImageFormat.SRGB, data=frame_rgb)
+    result = hand_landmarker.detect(mp_image)
+    if result and result.hand_landmarks:
+        return SimpleNamespace(landmark=result.hand_landmarks[0])
+    return None
 
 # ─────────────────────────────────────────────────────────────
 # PC-BKT  MODEL  INTEGRATION
@@ -74,6 +123,8 @@ ADAPTIVE_REEVAL_EVERY = 5
 
 # ─── STUDENT  LEVEL  PERSISTENCE ────────────────────────────
 SCRIPT_DIR        = os.path.dirname(os.path.abspath(__file__))
+PHOTO_DIR         = os.path.join(SCRIPT_DIR, "photos")
+AUDIO_DIR         = os.path.join(SCRIPT_DIR, "audio")
 CSV_DIR           = os.path.join(SCRIPT_DIR, "game_data")
 INTERACTIONS_CSV  = os.path.join(CSV_DIR, "interactions.csv")
 SESSIONS_CSV      = os.path.join(CSV_DIR, "sessions.csv")
@@ -360,10 +411,7 @@ number_font = pygame.font.Font(None, 300)
 clock       = pygame.time.Clock()
 
 # ─── MediaPipe ───────────────────────────────────────────────
-mp_hands = mp.solutions.hands
-hands    = mp_hands.Hands(static_image_mode=False, max_num_hands=1,
-                          min_detection_confidence=0.7,
-                          min_tracking_confidence=0.7)
+load_hand_landmarker()
 
 # ─── Camera ──────────────────────────────────────────────────
 cap = cv2.VideoCapture(0)
@@ -395,8 +443,9 @@ number_pronunciation = {}
 def try_load_sound(base, exts=('.MP3', '.WAV', '.OGG', '.mp3', '.wav')):
     for ext in exts:
         try:
-            s = pygame.mixer.Sound(base + ext)
-            print(f"  ✓ {base+ext}")
+            filename = os.path.join(AUDIO_DIR, base + ext)
+            s = pygame.mixer.Sound(filename)
+            print(f"  ✓ {filename}")
             return s
         except Exception:
             pass
@@ -434,7 +483,7 @@ def play_sound(sound, allow_interrupt=True, volume=None):
 
 # ─── Apple / Basket images ───────────────────────────────────
 try:
-    apple_surface = pygame.image.load("apple.png").convert_alpha()
+    apple_surface = pygame.image.load(os.path.join(PHOTO_DIR, "apple.png")).convert_alpha()
     apple_surface = pygame.transform.scale(apple_surface, (APPLE_SIZE, APPLE_SIZE))
 except Exception:
     apple_surface = pygame.Surface((APPLE_SIZE, APPLE_SIZE), pygame.SRCALPHA)
@@ -452,7 +501,7 @@ empty_apple_surface.fill((255, 255, 255, 100), special_flags=pygame.BLEND_RGBA_M
 basket_images = []
 for i in range(11):
     try:
-        img = pygame.image.load(f"basket{i}.png").convert_alpha()
+        img = pygame.image.load(os.path.join(PHOTO_DIR, f"basket{i}.png")).convert_alpha()
         basket_images.append(pygame.transform.scale(img, (basket["w"], basket["h"])))
     except Exception:
         surf = pygame.Surface((basket["w"], basket["h"]), pygame.SRCALPHA)
@@ -649,17 +698,21 @@ while game_sel_active and running:
 
     finger_pos      = None
     current_pinch   = False
-    try:
-        fr = cv2.flip(cv2.cvtColor(cv2.resize(img,(WIDTH,HEIGHT)), cv2.COLOR_BGR2RGB), 1)
-        res = hands.process(fr)
-    except Exception:
-        res = None
+    lms = None
+    if hand_landmarker is not None:
+        try:
+            fr = cv2.flip(cv2.resize(img, (WIDTH, HEIGHT)), 1)
+            lms = detect_hand_landmarks(fr)
+        except Exception:
+            lms = None
 
-    if res and res.multi_hand_landmarks:
-        lms = res.multi_hand_landmarks[0]
+    if lms:
         finger_pos   = (int(lms.landmark[8].x*WIDTH), int(lms.landmark[8].y*HEIGHT))
         current_pinch = compute_pinch_state(lms, WIDTH, HEIGHT)
         draw_hand_skeleton(screen, lms, WIDTH, HEIGHT)
+    else:
+        finger_pos = pygame.mouse.get_pos()
+        current_pinch = bool(pygame.mouse.get_pressed(3)[0])
 
     bg = pygame.Surface((WIDTH,120), pygame.SRCALPHA)
     bg.fill((0,0,0,150)); screen.blit(bg,(0,50))
@@ -934,14 +987,15 @@ while running:
     # ── Hand tracking ────────────────────────────────────────
     current_is_pinch = False
     index_pos        = None
-    try:
-        fr = cv2.flip(cv2.cvtColor(cv2.resize(img,(WIDTH,HEIGHT)), cv2.COLOR_BGR2RGB), 1)
-        res = hands.process(fr)
-    except Exception:
-        res = None
+    lms = None
+    if hand_landmarker is not None:
+        try:
+            fr = cv2.flip(cv2.resize(img, (WIDTH, HEIGHT)), 1)
+            lms = detect_hand_landmarks(fr)
+        except Exception:
+            lms = None
 
-    if res and res.multi_hand_landmarks:
-        lms = res.multi_hand_landmarks[0]
+    if lms:
         rx  = lms.landmark[8].x * WIDTH
         ry  = lms.landmark[8].y * HEIGHT
         if smoothed_finger_pos is None:
@@ -954,6 +1008,10 @@ while running:
         index_pos        = (int(smoothed_finger_pos[0]), int(smoothed_finger_pos[1]))
         current_is_pinch = compute_pinch_state(lms, WIDTH, HEIGHT)
         draw_hand_skeleton(screen, lms, WIDTH, HEIGHT)
+    else:
+        finger_pos = pygame.mouse.get_pos()
+        index_pos = finger_pos
+        current_is_pinch = bool(pygame.mouse.get_pressed(3)[0])
 
     # ── Message timeout ──────────────────────────────────────
     if message and time.time()-message_time > message_duration:
